@@ -1,19 +1,29 @@
-mod bundle;
-mod convert;
-mod ink;
-mod model;
-
-use anyhow::{Context, Result, bail};
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+use anyhow::Result;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use clap::Parser as ClapParser;
-use onenote_parser::Parser;
-use onenote_parser::notebook::Notebook;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use onenote_parser::section::{Section, SectionEntry};
-use std::path::{Path, PathBuf};
-use typed_path::TypedPath;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+use std::path::PathBuf;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+use vive_converter::{Source, VERSION, convert_source, parse_input, write_bundle};
 
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn main() {}
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 #[derive(Debug, ClapParser)]
-#[command(about = "Convert OneNote notebooks to ViveNotes .vive bundles")]
+#[command(
+    about = "Convert OneNote notebooks to ViveNotes .vive bundles",
+    version = VERSION,
+    disable_version_flag = true
+)]
 struct Args {
+    /// Print the converter version.
+    #[arg(short = 'v', long = "version", action = clap::ArgAction::Version)]
+    version: Option<bool>,
+
     /// A OneNote .onepkg, .onetoc2, or .one file.
     input: PathBuf,
 
@@ -34,6 +44,7 @@ struct Args {
     verbose: bool,
 }
 
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 fn main() -> Result<()> {
     let args = Args::parse();
     let notebook = parse_input(&args.input)?;
@@ -48,11 +59,11 @@ fn main() -> Result<()> {
     let output = args
         .output
         .unwrap_or_else(|| args.input.with_extension("vive"));
-    let converted = convert::convert(&notebook, &args.input)?;
+    let converted = convert_source(&notebook, &args.input)?;
     for warning in &converted.warnings {
         eprintln!("conversion warning: {warning}");
     }
-    let summary = bundle::write_bundle(&converted, &output, args.force)?;
+    let summary = write_bundle(&converted, &output, args.force)?;
     println!(
         "wrote {} ({} bytes; sections={}, pages={}, strokes={}, attachments={}, warnings={})",
         output.display(),
@@ -66,37 +77,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-pub(crate) enum Source {
-    Notebook(Notebook),
-    Section(Section),
-}
-
-fn parse_input(input: &Path) -> Result<Source> {
-    let input_text = input.to_str().context("input path is not valid Unicode")?;
-    let typed = TypedPath::derive(input_text);
-    let parser = Parser::new();
-    match input
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some("onepkg") => parser
-            .parse_package(typed)
-            .map(Source::Notebook)
-            .context("parsing OneNote package"),
-        Some("onetoc2") => parser
-            .parse_notebook(typed)
-            .map(Source::Notebook)
-            .context("parsing OneNote notebook"),
-        Some("one") => parser
-            .parse_section(typed)
-            .map(Source::Section)
-            .context("parsing OneNote section"),
-        _ => bail!("input must have a .onepkg, .onetoc2, or .one extension"),
-    }
-}
-
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 fn print_summary(source: &Source) {
     #[derive(Default)]
     struct Counts {
@@ -177,10 +158,12 @@ fn print_summary(source: &Source) {
     );
 }
 
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 fn count_strokes(ink: &onenote_parser::contents::Ink) -> usize {
     ink.ink_strokes().len() + ink.child_groups().iter().map(count_strokes).sum::<usize>()
 }
 
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 fn print_representative_content(source: &Source) {
     fn inspect_section(section: &Section) -> bool {
         let Some(page) = section

@@ -1,7 +1,7 @@
 # ViveNotes OneNote converter
 
 This standalone CLI converts a OneNote package, notebook, or section into a portable ViveNotes
-`.vive` notebook. It uses the adjacent `onenote.rs` checkout and does not modify the Android app.
+`.vive` notebook. It uses the adjacent `onenote.rs`.
 
 ```sh
 cd converter/vive-converter
@@ -9,8 +9,55 @@ cargo run --release -- ../Calculus2.onepkg
 ```
 
 The output defaults to the input name with a `.vive` extension. Use `--output PATH` to choose a
-different destination, `--force` to replace an existing file, or `--inspect --verbose` to parse and
-summarize a source without converting it.
+different destination, `--force` to replace an existing file.
+
+Print the converter version with `-v` or `--version`:
+
+```sh
+cargo run --release -- -v
+```
+
+## Browser WebAssembly
+
+The browser build performs parsing, SQLite generation, validation, and ZIP creation locally.
+`wasm32-unknown-unknown` Rust target, Clang (used to compile SQLite), and `wasm-pack`, then run:
+
+```sh
+make wasm
+```
+
+This creates a web-targeted ES module in `pkg/`. A minimal file-picker integration looks like:
+
+```js
+import init, { convert, version } from './pkg/vive_converter.js';
+
+await init();
+console.log(`Vive converter ${version()}`);
+
+async function convertUpload(file) {
+  const input = new Uint8Array(await file.arrayBuffer());
+  const result = convert(input, file.name);
+  const outputFileName = result.outputFileName;
+  const warnings = JSON.parse(result.warningsJson);
+  const output = result.intoBytes();
+
+  const url = URL.createObjectURL(
+    new Blob([output], { type: 'application/vnd.vivenotes.notebook+zip' }),
+  );
+  const link = Object.assign(document.createElement('a'), {
+    href: url,
+    download: outputFileName,
+  });
+  link.click();
+  URL.revokeObjectURL(url);
+  return warnings;
+}
+```
+
+The browser API accepts `.onepkg` notebook exports and individual `.one` sections. A `.onetoc2`
+file references other files beside it, so the single-upload browser API rejects it; export the
+notebook as `.onepkg` instead. Conversion is synchronous and can be CPU- and memory-intensive for
+large notebooks, so call it from a Web Worker in the website UI.
 
 The converter preserves sections, pages, positioned rich text, common inline equations, lists,
 tables, images, and ink. Section groups become a slash-separated section path because `.vive` v1

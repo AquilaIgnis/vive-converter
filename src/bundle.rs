@@ -1,22 +1,24 @@
 use crate::ink::validate_gzip_proto;
 use crate::model::{BundleAttachment, BundleCounts, BundleFile, ConvertedNotebook, Manifest};
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, MAIN_DB, params};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::File;
-use std::io::{Read, Write};
-use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
-use tempfile::NamedTempFile;
+use std::io::{Cursor, Read, Write};
 use uuid::Uuid;
 use zip::write::SimpleFileOptions;
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+use std::path::Path;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+use tempfile::NamedTempFile;
 
 const FORMAT: &str = "com.vivenotes.notebook";
 const FORMAT_VERSION: u32 = 1;
 const APP_SCHEMA_VERSION: u32 = 13;
 const APPLICATION_ID: u32 = 0x5649_5645;
 
+#[derive(Debug, Clone, Copy)]
 pub struct BundleSummary {
     pub sections: usize,
     pub pages: usize,
@@ -25,6 +27,7 @@ pub struct BundleSummary {
     pub bytes: u64,
 }
 
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub fn write_bundle(
     notebook: &ConvertedNotebook,
     output: &Path,
@@ -39,12 +42,20 @@ pub fn write_bundle(
     let parent = output.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)
         .with_context(|| format!("creating output directory {}", parent.display()))?;
-    let staging = tempdir_in(parent)?;
-    let database_path = staging.path().join("notebook.sqlite");
-    write_database(notebook, &database_path)?;
-    validate_database(notebook, &database_path)?;
+    let (bytes, summary) = build_bundle(notebook)?;
+    let mut temporary = NamedTempFile::new_in(parent)?;
+    temporary.write_all(&bytes)?;
+    temporary.as_file_mut().sync_all()?;
+    temporary
+        .persist(output)
+        .map_err(|error| error.error)
+        .with_context(|| format!("publishing {}", output.display()))?;
+    Ok(summary)
+}
 
-    let database_bytes = std::fs::read(&database_path)?;
+/// Construct a complete `.vive` archive without touching the filesystem.
+pub fn build_bundle(notebook: &ConvertedNotebook) -> Result<(Vec<u8>, BundleSummary)> {
+    let database_bytes = write_database(notebook)?;
     let database_hash = sha256(&database_bytes);
     let sections = notebook.sections.len();
     let pages = notebook
@@ -110,9 +121,8 @@ pub fn write_bundle(
         .map(|(path, bytes)| format!("{}  {path}\n", sha256(bytes)))
         .collect::<String>();
 
-    let mut temporary = NamedTempFile::new_in(parent)?;
-    {
-        let mut zip = zip::ZipWriter::new(temporary.as_file_mut());
+    let bytes = {
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
         let options = SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated)
             .unix_permissions(0o644);
@@ -122,33 +132,22 @@ pub fn write_bundle(
         }
         zip.start_file("checksums.sha256", options)?;
         zip.write_all(checksums.as_bytes())?;
-        zip.finish()?;
-    }
-    temporary.as_file_mut().sync_all()?;
-    temporary
-        .persist(output)
-        .map_err(|error| error.error)
-        .with_context(|| format!("publishing {}", output.display()))?;
-    validate_archive(output)?;
+        zip.finish()?.into_inner()
+    };
+    validate_archive(&bytes)?;
 
-    Ok(BundleSummary {
+    let summary = BundleSummary {
         sections,
         pages,
         strokes,
         attachments: notebook.attachments.len(),
-        bytes: std::fs::metadata(output)?.len(),
-    })
+        bytes: bytes.len() as u64,
+    };
+    Ok((bytes, summary))
 }
 
-fn tempdir_in(parent: &Path) -> Result<tempfile::TempDir> {
-    tempfile::Builder::new()
-        .prefix(".vive-converter-")
-        .tempdir_in(parent)
-        .context("creating conversion staging directory")
-}
-
-fn write_database(notebook: &ConvertedNotebook, path: &Path) -> Result<()> {
-    let mut database = Connection::open(path)?;
+fn write_database(notebook: &ConvertedNotebook) -> Result<Vec<u8>> {
+    let mut database = Connection::open_in_memory()?;
     database.execute_batch(&format!(
         r#"
         PRAGMA foreign_keys = ON;
@@ -306,7 +305,7 @@ fn write_database(notebook: &ConvertedNotebook, path: &Path) -> Result<()> {
                 attachment.mime_type,
                 attachment.pixel_width,
                 attachment.pixel_height,
-                attachment.bytes.len() as u64,
+                i64::try_from(attachment.bytes.len()).context("attachment is too large")?,
                 attachment.ref_count,
                 attachment.created_at
             ],
@@ -314,11 +313,12 @@ fn write_database(notebook: &ConvertedNotebook, path: &Path) -> Result<()> {
     }
     transaction.commit()?;
     database.execute_batch("VACUUM; PRAGMA optimize;")?;
-    Ok(())
+    validate_database(notebook, &database)?;
+    let bytes = database.serialize(MAIN_DB)?.to_vec();
+    Ok(bytes)
 }
 
-fn validate_database(notebook: &ConvertedNotebook, path: &Path) -> Result<()> {
-    let database = Connection::open(path)?;
+fn validate_database(notebook: &ConvertedNotebook, database: &Connection) -> Result<()> {
     let quick: String = database.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
     if quick != "ok" {
         bail!("SQLite quick_check failed: {quick}")
@@ -340,9 +340,9 @@ fn validate_database(notebook: &ConvertedNotebook, path: &Path) -> Result<()> {
         .iter()
         .map(|section| section.pages.len())
         .sum();
-    let content_count: usize =
+    let content_count: i64 =
         database.query_row("SELECT COUNT(*) FROM page_content", [], |row| row.get(0))?;
-    if content_count != page_count {
+    if content_count != page_count as i64 {
         bail!("not every page has a document")
     }
     let mut docs = database.prepare("SELECT docJson FROM page_content")?;
@@ -359,9 +359,8 @@ fn validate_database(notebook: &ConvertedNotebook, path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn validate_archive(path: &Path) -> Result<()> {
-    let file = File::open(path)?;
-    let mut archive = zip::ZipArchive::new(file)?;
+fn validate_archive(bytes: &[u8]) -> Result<()> {
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes))?;
     let mut names = BTreeSet::new();
     let mut files = BTreeMap::new();
     for index in 0..archive.len() {
@@ -401,11 +400,34 @@ fn validate_archive(path: &Path) -> Result<()> {
 }
 
 fn now_millis() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(i64::MAX as u128) as i64
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        return js_now_millis();
+    }
+
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .min(i64::MAX as u128) as i64
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn js_now_millis() -> i64 {
+    use wasm_bindgen::prelude::*;
+
+    #[wasm_bindgen]
+    extern "C" {
+        #[wasm_bindgen(js_namespace = Date, js_name = now)]
+        fn date_now() -> f64;
+    }
+
+    date_now().max(0.0).min(i64::MAX as f64) as i64
 }
 
 fn sha256(bytes: &[u8]) -> String {
