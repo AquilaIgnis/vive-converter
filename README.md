@@ -21,3 +21,16 @@ Before publishing the output, the CLI validates SQLite integrity and foreign key
 AndroidX Ink gzip payloads, ZIP entry names, and every archive checksum. ViveNotes performs the
 authoritative full validation, including native AndroidX Ink decoding, when the notebook is
 imported.
+
+OneNote stores explicit ink colours as Windows `COLORREF` values (`0x00BBGGRR`); the converter
+normalizes them to ARGB and preserves highlighter transparency. It also samples OneNote's sparse
+shape-highlighter paths densely enough for AndroidX Ink to render their straight edges and corners
+without diagonal joins.
+
+If a notebook made by an older converter build is already in ViveNotes, remove that imported copy
+before importing the corrected bundle. Stable stroke IDs deliberately prevent a re-import from
+silently replacing existing strokes with different geometry.
+
+# SRC
+
+- https://github.com/msiemens/onenote.rs

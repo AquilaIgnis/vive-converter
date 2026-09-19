@@ -670,6 +670,17 @@ impl Converter {
             .max(stroke.height())
             .mul_add(HIMETRIC_TO_DP, 0.0)
             .clamp(0.25, 1000.0);
+        let transparency = stroke.transparency().unwrap_or_default();
+        let alpha = 255u8.saturating_sub(transparency);
+        let is_highlighter = stroke.pen_tip() == Some(1) && stroke.transparency().is_some();
+        if is_highlighter {
+            // OneNote shape-highlights are often stored as only the four rectangle corners plus
+            // the closing point. AndroidX Ink's highlighter brush expects a sampled centerline;
+            // feeding it thousand-dp jumps makes its chisel tip bridge the corners diagonally.
+            // Sampling at a fraction of the nib width retains the exact polyline while giving the
+            // brush enough inputs to form the same straight, square-edged bands OneNote draws.
+            points = densify_polyline(&points, (size_dp * 0.125).clamp(1.0, 4.0));
+        }
         let half = size_dp / 2.0;
         let min_x = points
             .iter()
@@ -691,12 +702,16 @@ impl Converter {
             .map(|point| point.1)
             .fold(f32::NEG_INFINITY, f32::max)
             + half;
-        let transparency = stroke.transparency().unwrap_or_default();
-        let alpha = 255u8.saturating_sub(transparency);
-        let rgb = stroke.color().unwrap_or(0x0020_2124) & 0x00ff_ffff;
-        let color_argb = (((alpha as u32) << 24) | rgb) as i32;
+        let color_argb = stroke
+            .color()
+            .map(|color| onenote_ink_color_argb(color, alpha))
+            .unwrap_or(0xff000000u32 as i32);
         let color_follows_theme = stroke.color().is_none();
-        let brush_family = if alpha < 220 { "highlighter" } else { "marker" };
+        let brush_family = if is_highlighter {
+            "highlighter"
+        } else {
+            "marker"
+        };
         let seq = build.seq;
         build.seq += 1;
         Ok(Some(ConvertedStroke {
@@ -704,11 +719,7 @@ impl Converter {
             seq,
             brush_family,
             size_dp,
-            color_argb: if color_follows_theme {
-                0xff000000u32 as i32
-            } else {
-                color_argb
-            },
+            color_argb,
             color_follows_theme,
             min_x,
             min_y,
@@ -750,6 +761,35 @@ fn split_utf16(text: &str, ends: &[u32]) -> Vec<String> {
         parts.push(text[byte_start..].to_owned());
     }
     parts
+}
+
+/// OneNote's `InkColor` is a Windows COLORREF: `0x00BBGGRR`, not an ARGB/RGB
+/// integer. Moving the low red byte into ARGB's red position is what keeps, for
+/// example, OneNote's `0x0000FFFF` yellow instead of turning it cyan.
+fn onenote_ink_color_argb(color_ref: u32, alpha: u8) -> i32 {
+    let red = color_ref & 0xff;
+    let green = color_ref & 0xff00;
+    let blue = (color_ref >> 16) & 0xff;
+    (((alpha as u32) << 24) | (red << 16) | green | blue) as i32
+}
+
+fn densify_polyline(points: &[(f32, f32)], max_step: f32) -> Vec<(f32, f32)> {
+    let Some(&first) = points.first() else {
+        return Vec::new();
+    };
+    let mut output = vec![first];
+    for pair in points.windows(2) {
+        let (start_x, start_y) = pair[0];
+        let (end_x, end_y) = pair[1];
+        let dx = end_x - start_x;
+        let dy = end_y - start_y;
+        let steps = (dx.hypot(dy) / max_step).ceil().max(1.0) as usize;
+        for step in 1..=steps {
+            let fraction = step as f32 / steps as f32;
+            output.push((start_x + dx * fraction, start_y + dy * fraction));
+        }
+    }
+    output
 }
 
 fn style_marks(style: &ParagraphStyling, base: &ParagraphStyling) -> Vec<Value> {
@@ -976,5 +1016,30 @@ mod tests {
     #[test]
     fn escapes_latex_syntax() {
         assert_eq!(escape_latex("a_b"), "a\\_b");
+    }
+
+    #[test]
+    fn converts_windows_colorref_to_argb() {
+        assert_eq!(
+            onenote_ink_color_argb(0x0000_ffff, 0x7f) as u32,
+            0x7fff_ff00
+        );
+        assert_eq!(
+            onenote_ink_color_argb(0x00ff_0000, 0xff) as u32,
+            0xff00_00ff
+        );
+    }
+
+    #[test]
+    fn densifies_sparse_highlighter_shapes_without_changing_the_path() {
+        let input = [(0.0, 0.0), (10.0, 0.0), (10.0, 6.0), (0.0, 6.0), (0.0, 0.0)];
+        let dense = densify_polyline(&input, 2.0);
+        assert_eq!(dense.first(), input.first());
+        assert_eq!(dense.last(), input.last());
+        assert!(dense.windows(2).all(|pair| {
+            let dx = pair[1].0 - pair[0].0;
+            let dy = pair[1].1 - pair[0].1;
+            dx.hypot(dy) <= 2.001
+        }));
     }
 }
