@@ -3,6 +3,8 @@
 This standalone CLI converts a OneNote package, notebook, or section into a portable ViveNotes
 `.vive` notebook. It uses the adjacent `onenote.rs`.
 
+> Docs on .vive format [here](https://github.com/AquilaIgnis/viveNotes/blob/master/docs/viveFormat.md)
+
 ```sh
 cd converter/vive-converter
 cargo run --release -- ../Calculus2.onepkg
@@ -20,7 +22,7 @@ cargo run --release -- -v
 ## Browser WebAssembly
 
 The browser build performs parsing, SQLite generation, validation, and ZIP creation locally.
-`wasm32-unknown-unknown` Rust target, Clang (used to compile SQLite), and `wasm-pack`, then run:
+`wasm32-unknown-unknown` Rust target, Clang (used to compile SQLite), and `wasm-pack` , then run:
 
 ```sh
 make wasm
@@ -54,6 +56,8 @@ async function convertUpload(file) {
 }
 ```
 
+# Info
+
 The browser API accepts `.onepkg` notebook exports and individual `.one` sections. A `.onetoc2`
 file references other files beside it, so the single-upload browser API rejects it; export the
 notebook as `.onepkg` instead. Conversion is synchronous and can be CPU- and memory-intensive for
@@ -70,13 +74,7 @@ authoritative full validation, including native AndroidX Ink decoding, when the 
 imported.
 
 OneNote stores explicit ink colours as Windows `COLORREF` values (`0x00BBGGRR`); the converter
-normalizes them to ARGB and preserves highlighter transparency. It also samples OneNote's sparse
-shape-highlighter paths densely enough for AndroidX Ink to render their straight edges and corners
-without diagonal joins.
-
-If a notebook made by an older converter build is already in ViveNotes, remove that imported copy
-before importing the corrected bundle. Stable stroke IDs deliberately prevent a re-import from
-silently replacing existing strokes with different geometry.
+normalizes them to ARGB and preserves highlighter transparency.
 
 # SRC
 
